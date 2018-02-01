@@ -557,7 +557,7 @@ class LabelledData(param.Parameterized):
             clone_type = new_type
             new_params = new_type.params()
             params = {k: v for k, v in params.items()
-                      if k in new_params}
+                      if k in new_params and k != 'extents'}
             if params.get('group') == self.params()['group'].default:
                 params.pop('group')
         settings = dict(params, **overrides)

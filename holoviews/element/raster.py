@@ -68,6 +68,25 @@ class Raster(Dataset, Element2D):
             self.extents = extents
 
 
+    def __setstate__(self, state):
+        """
+        Ensures old-style unpickled Image types without an interface
+        use the ImageInterface.
+
+        Note: Deprecate as part of 2.0
+        """
+        self.__dict__ = state
+        if isinstance(self.data, np.ndarray):
+            self.interface = GridInterface
+        super(Raster, self).__setstate__(state)
+
+
+    def aggregate(self, dimensions=None, function=None, spreadfn=None, **kwargs):
+        agg = super(Raster, self).aggregate(dimensions, function, spreadfn, **kwargs)
+        return Curve(agg) if isinstance(agg, Dataset) and len(self.vdims) == 1 else agg
+
+
+
 class Image(Raster, SheetCoordinateSystem):
     """
     Image is the atomic unit as which 2D data is stored, along with
@@ -146,11 +165,6 @@ class Image(Raster, SheetCoordinateSystem):
         if isinstance(self.data, np.ndarray):
             self.interface = ImageInterface
         super(Dataset, self).__setstate__(state)
-
-
-    def aggregate(self, dimensions=None, function=None, spreadfn=None, **kwargs):
-        agg = super(Image, self).aggregate(dimensions, function, spreadfn, **kwargs)
-        return Curve(agg) if isinstance(agg, Dataset) and len(self.vdims) == 1 else agg
 
 
     def select(self, selection_specs=None, **selection):
