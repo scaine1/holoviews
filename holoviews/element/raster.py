@@ -1,16 +1,19 @@
 import sys
 from operator import itemgetter
+import colorsys
 
 import numpy as np
-import colorsys
 import param
 
+from ..core import Dimension, Element2D, Overlay, Dataset
 from ..core import util
 from ..core.data import ImageInterface, GridInterface
-from ..core import Dimension, Element2D, Overlay, Dataset
+from ..core.data.interface import DataError
+from ..core.dimension import process_dimensions
 from ..core.boundingregion import BoundingRegion, BoundingBox
 from ..core.sheetcoords import SheetCoordinateSystem, Slice
-from ..core.util import dimension_range, compute_density, datetime_types
+from ..core.util import (OrderedDict, dimension_range, compute_density,
+                         datetime_types)
 from .chart import Curve
 from .graphs import TriMesh
 from .tabular import Table
@@ -18,7 +21,7 @@ from .util import (compute_slice_bounds, categorical_aggregate2d,
                    validate_regular_sampling)
 
 
-class Raster(Element2D):
+class Raster(Dataset, Element2D):
     """
     Raster is a basic 2D element type for presenting either numpy or
     dask arrays as two dimensional raster images.
@@ -32,6 +35,9 @@ class Raster(Element2D):
     specified.
     """
 
+    datatype = param.List(default=['grid', 'xarray', 'cube', 'dataframe',
+                                   'dictionary'])
+
     kdims = param.List(default=[Dimension('x'), Dimension('y')],
                        bounds=(2, 2), constant=True, doc="""
         The label of the x- and y-dimension of the Raster in form
@@ -44,168 +50,25 @@ class Raster(Element2D):
         The dimension description of the data held in the matrix.""")
 
     def __init__(self, data, kdims=None, vdims=None, extents=None, **params):
-        if extents is None:
-            (d1, d2) = data.shape[:2]
-            extents = (0, 0, d2, d1)
-        super(Raster, self).__init__(data, kdims=kdims, vdims=vdims, extents=extents, **params)
-
-
-    def __getitem__(self, slices):
-        if slices in self.dimensions(): return self.dimension_values(slices)
-        slices = util.process_ellipses(self,slices)
-        if not isinstance(slices, tuple):
-            slices = (slices, slice(None))
-        elif len(slices) > (2 + self.depth):
-            raise KeyError("Can only slice %d dimensions" % 2 + self.depth)
-        elif len(slices) == 3 and slices[-1] not in [self.vdims[0].name, slice(None)]:
-            raise KeyError("%r is the only selectable value dimension" % self.vdims[0].name)
-
-        slc_types = [isinstance(sl, slice) for sl in slices[:2]]
-        data = self.data.__getitem__(slices[:2][::-1])
-        if all(slc_types):
-            return self.clone(data, extents=None)
-        elif not any(slc_types):
-            return data
-        else:
-            return self.clone(np.expand_dims(data, axis=slc_types.index(True)),
-                              extents=None)
-
-
-    def range(self, dim, data_range=True):
-        idx = self.get_dimension_index(dim)
-        if data_range and idx == 2:
-            dimension = self.get_dimension(dim)
-            lower, upper = np.nanmin(self.data), np.nanmax(self.data)
-            return dimension_range(lower, upper, dimension)
-        return super(Raster, self).range(dim, data_range)
-
-
-    def dimension_values(self, dim, expanded=True, flat=True):
-        """
-        The set of samples available along a particular dimension.
-        """
-        dim_idx = self.get_dimension_index(dim)
-        if not expanded and dim_idx == 0:
-            return np.array(range(self.data.shape[1]))
-        elif not expanded and dim_idx == 1:
-            return np.array(range(self.data.shape[0]))
-        elif dim_idx in [0, 1]:
-            values = np.mgrid[0:self.data.shape[1], 0:self.data.shape[0]][dim_idx]
-            return values.flatten() if flat else values
-        elif dim_idx == 2:
-            arr = self.data.T
-            return arr.flatten() if flat else arr
-        else:
-            return super(Raster, self).dimension_values(dim)
-
-
-    @classmethod
-    def collapse_data(cls, data_list, function, kdims=None, **kwargs):
-        if isinstance(function, np.ufunc):
-            return function.reduce(data_list)
-        else:
-            return function(np.dstack(data_list), axis=-1, **kwargs)
-
-
-    def sample(self, samples=[], **sample_values):
-        """
-        Sample the Raster along one or both of its dimensions,
-        returning a reduced dimensionality type, which is either
-        a ItemTable, Curve or Scatter. If two dimension samples
-        and a new_xaxis is provided the sample will be the value
-        of the sampled unit indexed by the value in the new_xaxis
-        tuple.
-        """
-        if isinstance(samples, tuple):
-            X, Y = samples
-            samples = zip(X, Y)
-
-        params = dict(self.get_param_values(onlychanged=True),
-                      vdims=self.vdims)
-        params.pop('extents', None)
-        params.pop('bounds', None)
-        if len(sample_values) == self.ndims or len(samples):
-            if not len(samples):
-                samples = zip(*[c if isinstance(c, list) else [c] for _, c in
-                               sorted([(self.get_dimension_index(k), v) for k, v in
-                                       sample_values.items()])])
-            table_data = [c+(self._zdata[self._coord2matrix(c)],)
-                          for c in samples]
-            params['kdims'] = self.kdims
-            return Table(table_data, **params)
-        else:
-            dimension, sample_coord = list(sample_values.items())[0]
-            if isinstance(sample_coord, slice):
-                raise ValueError(
-                    'Raster sampling requires coordinates not slices,'
-                    'use regular slicing syntax.')
-            # Indices inverted for indexing
-            sample_ind = self.get_dimension_index(dimension)
-            if sample_ind is None:
-                raise Exception("Dimension %s not found during sampling" % dimension)
-            other_dimension = [d for i, d in enumerate(self.kdims) if
-                               i != sample_ind]
-
-            # Generate sample slice
-            sample = [slice(None) for i in range(self.ndims)]
-            coord_fn = (lambda v: (v, 0)) if not sample_ind else (lambda v: (0, v))
-            sample[sample_ind] = self._coord2matrix(coord_fn(sample_coord))[abs(sample_ind-1)]
-
-            # Sample data
-            x_vals = self.dimension_values(other_dimension[0].name, False)
-            ydata = self._zdata[sample[::-1]]
-            if hasattr(self, 'bounds') and sample_ind == 0: ydata = ydata[::-1]
-            data = list(zip(x_vals, ydata))
-            params['kdims'] = other_dimension
-            return Curve(data, **params)
-
-
-    def reduce(self, dimensions=None, function=None, **reduce_map):
-        """
-        Reduces the Raster using functions provided via the
-        kwargs, where the keyword is the dimension to be reduced.
-        Optionally a label_prefix can be provided to prepend to
-        the result Element label.
-        """
-        function, dims = self._reduce_map(dimensions, function, reduce_map)
-        if len(dims) == self.ndims:
-            if isinstance(function, np.ufunc):
-                return function.reduce(self.data, axis=None)
+        if isinstance(data, np.ndarray):
+            if data.ndim == 2:
+                d2, d1 = data.shape
+                dims = process_dimensions(kdims, vdims)
+                x, y = dims.get('kdims', self.kdims)
+                z = dims.get('vdims', self.vdims)[0]
+                data = OrderedDict([(x.name, np.arange(d1)), (y.name, np.arange(d2)),
+                                    (z.name, data)])  
             else:
-                return function(self.data)
+                raise DataError('%s type expects 2D array data.' % type(self).__name__,
+                                GridInterface)
+        super(Raster, self).__init__(data, kdims=kdims, vdims=vdims, **params)
+        if extents is None:
+            self.extents = (0, 0)+self.interface.shape(self, gridded=True)[::-1]
         else:
-            dimension = dims[0]
-            other_dimension = [d for d in self.kdims if d.name != dimension]
-            oidx = self.get_dimension_index(other_dimension[0])
-            x_vals = self.dimension_values(other_dimension[0].name, False)
-            reduced = function(self._zdata, axis=oidx)
-            if oidx and hasattr(self, 'bounds'):
-                reduced = reduced[::-1]
-            data = zip(x_vals, reduced)
-            params = dict(dict(self.get_param_values(onlychanged=True)),
-                          kdims=other_dimension, vdims=self.vdims)
-            params.pop('bounds', None)
-            params.pop('extents', None)
-            return Table(data, **params)
+            self.extents = extents
 
 
-    @property
-    def depth(self):
-        return len(self.vdims)
-
-
-    @property
-    def _zdata(self):
-        return self.data
-
-
-    def _coord2matrix(self, coord):
-        return int(round(coord[1])), int(round(coord[0]))
-
-
-
-
-class Image(Dataset, Raster, SheetCoordinateSystem):
+class Image(Raster, SheetCoordinateSystem):
     """
     Image is the atomic unit as which 2D data is stored, along with
     its bounds object. The input data may be a numpy.matrix object or
