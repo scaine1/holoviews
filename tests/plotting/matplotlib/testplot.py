@@ -9,6 +9,8 @@ from holoviews.element.comparison import ComparisonTestCase
 from holoviews.plotting import comms
 
 try:
+    from matplotlib import pyplot
+    pyplot.switch_backend('agg')
     import holoviews.plotting.mpl
     mpl_renderer = Store.renderers['matplotlib']
 except:
